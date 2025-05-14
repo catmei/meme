@@ -1,0 +1,32 @@
+{
+  block {
+    hash
+    number
+    timestamp
+    logs(filter: {
+      addresses: [
+        "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",  # USDC/ETH 0.05%
+      ]
+    }) {
+      data
+      topics
+      index
+      account {
+        address
+      }
+      transaction {
+        hash
+        from {
+          address
+        }
+        to {
+          address
+        }
+        value
+        gas
+        gasPrice
+        status
+      }
+    }
+  }
+} 
