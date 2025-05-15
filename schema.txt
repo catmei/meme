@@ -1,0 +1,4 @@
+swap_event:
+block, timestamp, amount0, amount1, sqrtPriceX96, pool_address, log_index, tx_hash, network, alchemy_createdAt
+pool_info:
+pool_address, address0, decimals0, symbol0, address1, decimals1, symbol1
