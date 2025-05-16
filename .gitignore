@@ -1,3 +1,6 @@
 .venv/
 .env
 plan.txt
+__pycache__
+swap_events_output.csv
+swap_events.csv
