@@ -3,3 +3,5 @@ flask
 python-dotenv
 requests
 kafka-python
+google-cloud-bigquery
+numpy

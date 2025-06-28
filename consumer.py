@@ -1,13 +1,14 @@
 import time
 import datetime
-import csv
 import os
 import collections
 import numpy as np # For z-score calculation
 import json # For parsing Kafka messages
 
 # --- Import functions from process.py ---
-from process import process_swap_event, _save_event_to_csv
+from process import process_swap_event
+# --- Import BigQuery functions ---
+from bq_utils import save_events_to_bq_batch
 
 # --- Kafka Configuration ---
 KAFKA_BROKER_URL = os.environ.get('KAFKA_BROKER_URL', 'localhost:9092')
@@ -15,25 +16,19 @@ KAFKA_TOPIC = 'alchemy_full_payloads' # Target Kafka topic
 # KAFKA_CONSUMER_GROUP = 'swap_event_consumer_group' # Optional: define a consumer group
 
 # --- Configuration ---
-CSV_FILE_PATH = "swap_events_output.csv"
-# These headers should match the output of process_swap_event
-CSV_HEADERS = [
-    "block", "timestamp", "amount0", "amount1", "sqrtPriceX96",
-    "pool_address", "log_index", "tx_hash", "network",
-    "alchemy_createdAt", "server_createdAt"
-]
-CSV_SAVE_INTERVAL_SECONDS = 60  # 1 minute
+BQ_SAVE_INTERVAL_SECONDS = 60
+BQ_BATCH_SIZE_THRESHOLD = 10
 ROLLING_WINDOW_SIZE = 10
 ALERT_TRACKER_RETENTION_PER_POOL = 100  # Keep track of the last 100 blocks per pool for alerting
 Z_SCORE_THRESHOLD = 2.0
 
 # --- Timers and Counters ---
-last_csv_save_timestamp = time.time()
+last_bq_save_timestamp = time.time()
 last_tracker_prune_timestamp = time.time()
 PRUNE_INTERVAL_SECONDS = 300 # Prune every 5 minutes, for example
 
 # --- Consumer Data Structures ---
-master_csv_data_cache = []
+master_bq_data_cache = []
 pool_rolling_block_volumes = collections.defaultdict(lambda: collections.deque(maxlen=ROLLING_WINDOW_SIZE))
 last_activity_block_for_pool = collections.defaultdict(int) # Stores the latest block number processed (real or zero-filled) for a pool
 pool_processed_blocks_for_hot_alert = collections.defaultdict(set) # Tracks (pool, block_num) for alerting window to prevent duplicates
@@ -42,7 +37,7 @@ def alert_volume_spike(pool_address, z_score, latest_volume, block_number):
     print(f"ALERT! Volume spike in pool {pool_address} (Block: {block_number})! Z-score: {z_score:.2f}, Latest Vol: {latest_volume:.2f}")
 
 def run_consumer():
-    global last_csv_save_timestamp, master_csv_data_cache, last_tracker_prune_timestamp
+    global last_bq_save_timestamp, master_bq_data_cache, last_tracker_prune_timestamp
 
     print("Starting Kafka consumer...")
     print(f"Attempting to connect to Kafka broker at: {KAFKA_BROKER_URL}, topic: {KAFKA_TOPIC}")
@@ -79,28 +74,27 @@ def run_consumer():
             if not parsed_rows:
                 print("DEBUG: No processable rows from swap event.")
                 # Still check for timed save even if no new rows
-                check_and_save_csv()
+                check_and_save_bq()
                 check_and_prune_tracker()
-                time.sleep(0.1) # Simulate message arrival delay
                 continue
 
             # Temporary aggregation for current message (in case one message has multiple swaps for same pool/block)
             current_message_aggregated_volumes = collections.defaultdict(lambda: collections.defaultdict(float))
 
-            for csv_row in parsed_rows:
-                master_csv_data_cache.append(csv_row) # Add to main CSV cache
+            for row_data in parsed_rows:
+                master_bq_data_cache.append(row_data) # Add to main BigQuery cache
 
-                pool_address = csv_row['pool_address']
-                # Ensure block is an integer for logic, though it's string in CSV
+                pool_address = row_data['pool_address']
+                # Ensure block is an integer for logic
                 try:
-                    block_number_int = int(csv_row['block'])
+                    block_number_int = int(row_data['block'])
                 except ValueError:
-                    print(f"WARN: Could not parse block number to int: {csv_row['block']} for pool {pool_address}")
+                    print(f"WARN: Could not parse block number to int: {row_data['block']} for pool {pool_address}")
                     continue
                 
                 try:
                     # Calculate volume (sum of absolute amounts for simplicity)
-                    vol0 = float(csv_row.get('amount0', "0"))
+                    vol0 = float(row_data.get('amount0', "0"))
                     swap_volume = abs(vol0)
                     current_message_aggregated_volumes[pool_address][block_number_int] += swap_volume
                 except ValueError:
@@ -150,25 +144,22 @@ def run_consumer():
                                 if z > Z_SCORE_THRESHOLD:
                                     print(pool_rolling_block_volumes)
                                     alert_volume_spike(pool_addr, z, latest_vol, current_event_block_num)
-                                    # exit()
                             elif avg_vol > 0 and latest_vol > avg_vol : # Handle case where std_dev is 0 but volume increased
                                  if latest_vol > avg_vol * Z_SCORE_THRESHOLD : # If it's a significant jump from constant
                                     alert_volume_spike(pool_addr, float('inf'), latest_vol, current_event_block_num)
 
 
-            # 3. Batch Save to CSV (Timed)
-            check_and_save_csv()
+            # 3. Batch Save to BigQuery (Timed)
+            check_and_save_bq()
 
             # 4. Prune Alert Tracker
             check_and_prune_tracker()
             
-            time.sleep(0.1) # Simulate message arrival delay for demo
 
-        # Final save on shutdown (simulated)
-        print("Consumer loop finished or timed out. Performing final CSV save...")
-        perform_csv_save()
-        # Note: Pruning is typically done during active consumption.
-        # If you need a final prune, call check_and_prune_tracker() here too.
+        # Final save on shutdown
+        print("Consumer loop finished or timed out. Performing final BigQuery save...")
+        perform_bq_save()
+        
 
     except NoBrokersAvailable:
         print(f"CRITICAL: NoBrokersAvailable. Could not connect to any Kafka brokers at {KAFKA_BROKER_URL}.")
@@ -183,24 +174,36 @@ def run_consumer():
             consumer.close()
         print("Consumer finished.")
 
-def check_and_save_csv():
-    global last_csv_save_timestamp
+def check_and_save_bq():
+    global last_bq_save_timestamp, master_bq_data_cache
     current_time = time.time()
-    if current_time - last_csv_save_timestamp >= CSV_SAVE_INTERVAL_SECONDS:
-        perform_csv_save()
-        last_csv_save_timestamp = current_time
 
-def perform_csv_save():
-    global master_csv_data_cache
-    if master_csv_data_cache:
-        print(f"INFO: Saving {len(master_csv_data_cache)} records to CSV...")
-        data_to_save = list(master_csv_data_cache) # Shallow copy
-        master_csv_data_cache.clear()
-        for row_data in data_to_save:
-            _save_event_to_csv(row_data, CSV_FILE_PATH, CSV_HEADERS)
-        print(f"INFO: CSV save complete. Cache cleared.")
+    # Check both conditions
+    time_trigger = (current_time - last_bq_save_timestamp) >= BQ_SAVE_INTERVAL_SECONDS
+    size_trigger = len(master_bq_data_cache) >= BQ_BATCH_SIZE_THRESHOLD
+
+    if time_trigger or size_trigger:
+        perform_bq_save()
+        last_bq_save_timestamp = current_time
+
+def perform_bq_save():
+    global master_bq_data_cache
+    if master_bq_data_cache:
+        print(f"INFO: Saving {len(master_bq_data_cache)} records to BigQuery...")
+        data_to_save = list(master_bq_data_cache) # Shallow copy
+        master_bq_data_cache.clear()
+        
+        # Use batch insert for better performance
+        success = save_events_to_bq_batch(data_to_save)
+        if success:
+            print(f"INFO: BigQuery save complete. Cache cleared.")
+        else:
+            print(f"ERROR: BigQuery save failed. Re-adding {len(data_to_save)} records to cache.")
+            # Re-add data to cache if save failed
+            master_bq_data_cache.extend(data_to_save)
+        print(f"INFO: BigQuery save complete. Cache cleared.")
     else:
-        print("INFO: CSV save interval reached, but no new data in cache.")
+        print("INFO: BigQuery save interval reached, but no new data in cache.")
 
 def check_and_prune_tracker():
     global last_tracker_prune_timestamp

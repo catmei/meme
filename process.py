@@ -39,34 +39,13 @@ UNI_V3_POOL_ABI = [
 POOL_INFO_CSV_FILE = "pool_info.csv"
 CSV_HEADERS = ["pool_address", "token0_address", "token0_decimals", "token0_symbol", "token1_address", "token1_decimals", "token1_symbol"]
 
-# Swap Events CSV configuration
-SWAP_EVENTS_CSV_FILE = "swap_events.csv"
-SWAP_EVENTS_CSV_HEADERS = ["block", "timestamp", "amount0", "amount1", "sqrtPriceX96", "pool_address", "log_index", "tx_hash", "network", "alchemy_createdAt", "server_createdAt"]
+# Swap Events data configuration
+SWAP_EVENTS_DATA_HEADERS = ["block", "timestamp", "amount0", "amount1", "sqrtPriceX96", "pool_address", "log_index", "tx_hash", "network", "alchemy_createdAt", "server_createdAt"]
 
 # Cache for pool token info {pool_address: {token0: {...}, token1: {...}}}
 POOL_INFO_CACHE = {}
 
-# Helper function to save data to a CSV file
-def _save_event_to_csv(event_details, csv_file_path, headers):
-    """Appends a dictionary of event details to a CSV file.
 
-    Args:
-        event_details (dict): A dictionary where keys are column headers.
-        csv_file_path (str): The path to the CSV file.
-        headers (list): A list of strings representing the CSV column headers.
-    """
-    try:
-        file_exists_and_not_empty = os.path.exists(csv_file_path) and os.path.getsize(csv_file_path) > 0
-        write_header = not file_exists_and_not_empty
-
-        with open(csv_file_path, mode='a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=headers)
-            if write_header:
-                writer.writeheader()
-            writer.writerow(event_details)
-        # print(f"  Successfully saved event to {csv_file_path}") # Optional for debugging
-    except Exception as e:
-        print(f"  Error saving event to {csv_file_path}: {e}")
 
 def get_token_info(token_address):
     """Fetches decimals and symbol for a given token address."""
@@ -187,7 +166,7 @@ def get_pool_info(pool_address):
 SWAP_EVENT_DATA_TYPES = ['int256', 'int256', 'uint160', 'uint128', 'int24']
 
 def process_swap_event(data):
-    """Process a Uniswap swap event, decode data, calculate price, and return data rows for CSV saving."""
+    """Process a Uniswap swap event, decode data, calculate price, and return data rows."""
     if not web3 or not web3.is_connected():
         print("Web3 not available or not connected. Cannot process swap event.")
         return [] # Return empty list if Web3 is not available
@@ -208,7 +187,7 @@ def process_swap_event(data):
         print("No logs found in the block data.")
         return [] # Return empty list if no logs
 
-    processed_rows_for_csv = [] # Initialize list to store rows
+    processed_rows = [] # Initialize list to store rows
 
     for log_data in logs:
         transaction_hash = log_data.get("transaction", {}).get("hash", "N/A")
@@ -241,11 +220,11 @@ def process_swap_event(data):
             print("  Pool address is N/A. Skipping pool info fetch.")
 
 
-        # Initialize values for CSV for this specific log
-        amount0_for_csv = "N/A"
-        amount1_for_csv = "N/A"
-        sqrtPriceX96_for_csv = "N/A"
-        can_write_to_csv = False
+        # Initialize values for this specific log
+        amount0_processed = "N/A"
+        amount1_processed = "N/A"
+        sqrtPriceX96_processed = "N/A"
+        can_process_data = False
 
         if pool_info:
             token0 = pool_info.get("token0")
@@ -272,11 +251,11 @@ def process_swap_event(data):
                         print(f"  Amount1 Change ({token1['symbol']}): {amount1_adj:.{token1['decimals']}f}")
                         print(f"  Raw sqrtPriceX96: {sqrtPriceX96_raw}")
                         
-                        # Prepare for CSV (use adjusted values, formatted)
-                        amount0_for_csv = f"{amount0_adj:.{token0['decimals']}f}"
-                        amount1_for_csv = f"{amount1_adj:.{token1['decimals']}f}"
-                        sqrtPriceX96_for_csv = sqrtPriceX96_raw
-                        can_write_to_csv = True
+                        # Prepare processed data (use adjusted values, formatted)
+                        amount0_processed = f"{amount0_adj:.{token0['decimals']}f}"
+                        amount1_processed = f"{amount1_adj:.{token1['decimals']}f}"
+                        sqrtPriceX96_processed = sqrtPriceX96_raw
+                        can_process_data = True
 
                         if sqrtPriceX96_raw > 0:
                             price_1_0 = ((sqrtPriceX96_raw / (2**96))**2) / (10**(token1['decimals'] - token0['decimals']))
@@ -295,17 +274,17 @@ def process_swap_event(data):
             else:
                 print("  Token information (token0 or token1) is missing from pool_info. Skipping detailed processing.")
         else: # pool_info was not retrieved or is None
-            print("  Could not retrieve valid pool info. Skipping detailed processing and CSV write for this log.")
-            # can_write_to_csv remains False
+            print("  Could not retrieve valid pool info. Skipping detailed processing for this log.")
+            # can_process_data remains False
 
-        # After processing the log, write to CSV if data is valid
-        if can_write_to_csv:
-            csv_row_data = {
+        # After processing the log, add to results if data is valid
+        if can_process_data:
+            row_data = {
                 "block": block_number if block_number is not None else "N/A",
                 "timestamp": block_timestamp if block_timestamp is not None else "N/A",
-                "amount0": amount0_for_csv,
-                "amount1": amount1_for_csv,
-                "sqrtPriceX96": sqrtPriceX96_for_csv,
+                "amount0": amount0_processed,
+                "amount1": amount1_processed,
+                "sqrtPriceX96": sqrtPriceX96_processed,
                 "pool_address": final_pool_address_for_csv, # Already checksummed or handled if malformed
                 "log_index": log_index,
                 "tx_hash": transaction_hash,
@@ -314,23 +293,23 @@ def process_swap_event(data):
                 "server_createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()
             }
             # Append the prepared row to the list
-            processed_rows_for_csv.append(csv_row_data)
+            processed_rows.append(row_data)
         else:
             # This 'else' branch might be mostly covered by previous print statements,
             # but can serve as a fallback or for specific debugging if needed.
-            # For example, if can_write_to_csv is False due to incomplete token0/token1 from pool_info
+            # For example, if can_process_data is False due to incomplete token0/token1 from pool_info
             if not (pool_info and token0 and token1 and data_hex and data_hex != "0x"):
                  # Error messages for these conditions are already printed earlier in the logic flow
                  pass # No additional generic message needed here as specific errors were logged
             else:
                  # This case implies pool_info, tokens, data_hex were present, but decoding failed (already logged)
-                 # Or some other logic prevented can_write_to_csv from being true
-                 print("  Skipping CSV write for this log due to data processing issues (check previous errors).")
+                 # Or some other logic prevented can_process_data from being true
+                 print("  Skipping data processing for this log due to processing issues (check previous errors).")
 
 
         print("--- End Swap Event (process.py) ---")
     
-    return processed_rows_for_csv # Return the list of processed rows
+    return processed_rows # Return the list of processed rows
 
 if __name__ == '__main__':
     # Example Usage (for testing process.py directly)
@@ -416,15 +395,13 @@ if __name__ == '__main__':
         }
 
         print("Testing process_swap_event with data from JSON:")
-        # process_swap_event(sample_data) # Old call
         list_of_event_rows = process_swap_event(sample_data)
 
         if list_of_event_rows:
-            print(f"Processed {len(list_of_event_rows)} event(s) for CSV saving.")
+            print(f"Processed {len(list_of_event_rows)} event(s).")
             for row_data in list_of_event_rows:
-                _save_event_to_csv(row_data, SWAP_EVENTS_CSV_FILE, SWAP_EVENTS_CSV_HEADERS)
-            print(f"Attempted to save processed events to {SWAP_EVENTS_CSV_FILE}")
+                print(f"Row data: {row_data}")
         else:
-            print("No event data was processed for CSV saving.")
+            print("No event data was processed.")
     else:
         print("Web3 is not connected. Cannot run full tests.") 

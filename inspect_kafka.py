@@ -26,24 +26,30 @@ try:
             # Try to fetch and print some data from each topic
             try:
                 from kafka import KafkaConsumer
+                
+                # First, count all messages in the topic
                 consumer = KafkaConsumer(
                     topic,
                     bootstrap_servers=[KAFKA_BROKER_URL],
                     auto_offset_reset='earliest',
                     enable_auto_commit=False,
-                    consumer_timeout_ms=2000,  # Short timeout for demo
+                    consumer_timeout_ms=5000,  # Longer timeout for counting
                     group_id=None
                 )
-                print(f"  Sample messages from topic '{topic}':")
-                msg_count = 0
+                total_msg_count = 0
+                first_message = None
                 for message in consumer:
-                    print(f"    Offset {message.offset}: {message.value}")
-                    msg_count += 1
-                    if msg_count >= 3:
-                        break
-                if msg_count == 0:
-                    print("    (No messages found in this topic.)")
+                    if total_msg_count == 0:
+                        first_message = message  # Store the first message
+                    total_msg_count += 1
                 consumer.close()
+                
+                print(f"  Total messages: {total_msg_count}")
+                if first_message:
+                    print(f"  First message (Offset {first_message.offset}): {first_message.value}")
+                else:
+                    print("    (No messages found in this topic.)")
+                    
             except Exception as e:
                 print(f"    Error reading messages from topic '{topic}': {e}")
     else:
