@@ -5,3 +5,6 @@ requests
 kafka-python
 google-cloud-bigquery
 numpy
+praw
+pandas
+apache-airflow
