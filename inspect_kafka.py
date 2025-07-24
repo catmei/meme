@@ -46,7 +46,10 @@ try:
                 
                 print(f"  Total messages: {total_msg_count}")
                 if first_message:
-                    print(f"  First message (Offset {first_message.offset}): {first_message.value}")
+                    import json
+                    first_message_value = json.loads(first_message.value)
+                    print(f"  First message (Offset {first_message.offset}):")
+                    print(json.dumps(first_message_value, indent=4))
                 else:
                     print("    (No messages found in this topic.)")
                     
